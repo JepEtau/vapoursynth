@@ -224,26 +224,61 @@ static void outputFrame(const VSFrame *frame, VSPipeOutputData *data) {
     if (!data->outputError && data->outFile) {
         if (data->vsapi->getFrameType(frame) == mtVideo) {
             const VSVideoFormat *fi = data->vsapi->getVideoFrameFormat(frame);
-            const int rgbRemap[] = { 1, 2, 0 };
-            for (int rp = 0; rp < fi->numPlanes; rp++) {
-                int p = (fi->colorFamily == cfRGB) ? rgbRemap[rp] : rp;
-                ptrdiff_t stride = data->vsapi->getStride(frame, p);
-                const uint8_t *readPtr = data->vsapi->getReadPtr(frame, p);
-                int rowSize = data->vsapi->getFrameWidth(frame, p) * fi->bytesPerSample;
-                int height = data->vsapi->getFrameHeight(frame, p);
+            // Ensure we're working with GBRP (cfRGB color family)
+            if (fi->colorFamily == cfRGB && fi->bitsPerSample == 8) {
+                const int rgbRemap[] = {2, 1, 0};
+                int width = data->vsapi->getFrameWidth(frame, 0);
+                int height = data->vsapi->getFrameHeight(frame, 0);
 
-                if (rowSize != stride) {
-                    bitblt(data->buffer.data(), rowSize, readPtr, stride, rowSize, height);
-                    readPtr = data->buffer.data();
+                // Allocate a buffer for each plane
+                std::vector<uint8_t> rgbBuffer(width * height * fi->numPlanes);
+                for (int rp = 0; rp < fi->numPlanes; rp++) {
+                    int p = rgbRemap[rp];
+                    const uint8_t* pPlane = data->vsapi->getReadPtr(frame, p);
+                    ptrdiff_t stride = data->vsapi->getStride(frame, p);
+                    int rowSize = data->vsapi->getFrameWidth(frame, p) * fi->bytesPerSample;
+
+                    for (int y = 0; y < height; y++) {
+                        const uint8_t* pSrc = pPlane + y * stride;
+                        uint8_t* pDst = &rgbBuffer[(y * width) * fi->numPlanes + rp];
+                        for (int x = 0; x < width; x++, pDst += fi->numPlanes) {
+                            *pDst = *pSrc++;
+                        }
+                    }
                 }
 
-                if (fwrite(readPtr, 1, rowSize * height, data->outFile) != static_cast<size_t>(rowSize * height)) {
+                // Write the RGB24 buffer to the output file
+                size_t rgbSize = rgbBuffer.size();
+                if (fwrite(rgbBuffer.data(), 1, rgbSize, data->outFile) != rgbSize) {
                     if (data->errorMessage.empty())
-                        data->errorMessage = "Error: fwrite() call failed when writing frame: " + std::to_string(data->outputFrames) + ", plane: " + std::to_string(p) +
-                        ", errno: " + std::to_string(errno);
+                        data->errorMessage = "Error: fwrite() call failed when writing RGB24 frame: " + std::to_string(data->outputFrames) +
+                                            ", errno: " + std::to_string(errno);
                     data->totalFrames = data->requestedFrames;
                     data->outputError = true;
-                    break;
+                }
+
+            } else {
+                const int rgbRemap[] = { 1, 2, 0 };
+                for (int rp = 0; rp < fi->numPlanes; rp++) {
+                    int p = (fi->colorFamily == cfRGB) ? rgbRemap[rp] : rp;
+                    ptrdiff_t stride = data->vsapi->getStride(frame, p);
+                    const uint8_t *readPtr = data->vsapi->getReadPtr(frame, p);
+                    int rowSize = data->vsapi->getFrameWidth(frame, p) * fi->bytesPerSample;
+                    int height = data->vsapi->getFrameHeight(frame, p);
+
+                    if (rowSize != stride) {
+                        bitblt(data->buffer.data(), rowSize, readPtr, stride, rowSize, height);
+                        readPtr = data->buffer.data();
+                    }
+
+                    if (fwrite(readPtr, 1, rowSize * height, data->outFile) != static_cast<size_t>(rowSize * height)) {
+                        if (data->errorMessage.empty())
+                            data->errorMessage = "Error: fwrite() call failed when writing frame: " + std::to_string(data->outputFrames) + ", plane: " + std::to_string(p) +
+                            ", errno: " + std::to_string(errno);
+                        data->totalFrames = data->requestedFrames;
+                        data->outputError = true;
+                        break;
+                    }
                 }
             }
         } else if (data->vsapi->getFrameType(frame) == mtAudio) {
@@ -258,7 +293,7 @@ static void outputFrame(const VSFrame *frame, VSPipeOutputData *data) {
             srcPtrs.reserve(numChannels);
             for (int channel = 0; channel < numChannels; channel++)
                 srcPtrs.push_back(data->vsapi->getReadPtr(frame, channel));
-            
+
             if (bytesPerOutputSample == 2)
                 PackChannels16to16le(srcPtrs.data(), data->buffer.data(), numSamples, numChannels);
             else if (bytesPerOutputSample == 3)
@@ -638,7 +673,7 @@ static bool printVersion(const VSAPI *vsapi) {
 
 static void printHelp() {
     fprintf(stderr,
-        "VSPipe R" XSTR(VAPOURSYNTH_CORE_VERSION) " usage:\n"
+        "VSPipe R" XSTR(VAPOURSYNTH_CORE_VERSION) " (Jep Etau version) usage:\n"
         "  vspipe [options] <script> <outfile>\n"
         "\n"
         "Available options:\n"
@@ -1158,7 +1193,7 @@ int main(int argc, char **argv) {
         data->outFile = outFile;
         data->timecodesFile = timecodesFile;
         data->jsonFile = jsonFile;
-        
+
         if (nodeType == mtVideo) {
 
             const VSVideoInfo *vi = vsapi->getVideoInfo(node);
@@ -1180,7 +1215,7 @@ int main(int argc, char **argv) {
             }
             if (success)
                 success = finalizeVideoOutput(data.get());
-            
+
         } else if (nodeType == mtAudio) {
 
             const VSAudioInfo *ai = vsapi->getAudioInfo(node);
@@ -1189,7 +1224,7 @@ int main(int argc, char **argv) {
             data->totalSamples = ai->numSamples;
 
             success = initializeAudioOutput(data.get());
-            if (success)                
+            if (success)
                 success = !outputNode(opts, data.get(), vssapi->getCore(se));
         }
 
